@@ -27,9 +27,10 @@ provider "aws" {
 
   default_tags {
     tags = {
-      Project   = var.project
-      ManagedBy = "terraform"
-      Repo      = "secure-cloud-platform"
+      Project     = var.project
+      Environment = "demo" # permet de filtrer les coûts et l'inventaire par environnement
+      ManagedBy   = "terraform"
+      Repo        = "secure-cloud-platform"
     }
   }
 }
