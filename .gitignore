@@ -1,0 +1,18 @@
+# Terraform : dossiers de travail, states et plans locaux (jamais dans git, ils peuvent contenir des secrets)
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+tfplan
+plan.txt
+crash.log
+
+# Valeurs propres à chaque environnement
+*.tfvars
+!*.tfvars.example
+
+# Notebook : sorties d'exécution
+.ipynb_checkpoints/
+
+# macOS
+.DS_Store

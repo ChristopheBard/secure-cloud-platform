@@ -1,0 +1,3 @@
+# À copier en terraform.tfvars (ce fichier-là est ignoré par git).
+github_owner = "ChristopheBard"
+github_repo  = "secure-cloud-platform"

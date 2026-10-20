@@ -1,0 +1,20 @@
+# Dependabot : bot GitHub qui ouvre des Pull Requests quand une dépendance a une nouvelle version.
+# Comme les actions sont épinglées par SHA, c'est lui qui propose les nouveaux SHA ;
+# un humain relit et fusionne.
+
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: docker
+    directory: /app
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: terraform
+    directories: ["/infra", "/bootstrap"]
+    schedule:
+      interval: weekly

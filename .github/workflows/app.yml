@@ -1,0 +1,118 @@
+# Pipeline applicative : construire l'image, la scanner, la publier, la déployer.
+#
+#   Sur une Pull Request :  docker build -> Trivy (bloquant)
+#   Après merge dans main : docker build -> Trivy (bloquant) -> push ECR (tag = SHA du commit) -> déploiement ECS
+#
+# Une image vulnérable ne peut donc jamais arriver dans le registre, ni a fortiori en production.
+
+name: Application
+
+on:
+  pull_request:
+    paths: ["app/**", ".github/workflows/app.yml"]
+  push:
+    branches: [main]
+    paths: ["app/**", ".github/workflows/app.yml"]
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: app-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: eu-west-3
+  ECR_REPOSITORY: scp-app
+  ECS_CLUSTER: scp-cluster
+  ECS_SERVICE: scp-service
+  TASK_FAMILY: scp-app
+
+jobs:
+  # Sur Pull Request : on vérifie seulement que l'image se construit et qu'elle est saine.
+  # Pas d'accès AWS ici.
+  scan:
+    name: Build et scan (Pull Request)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: docker build
+        run: docker build --build-arg VERSION=${{ github.sha }} -t app:${{ github.sha }} app
+
+      # Trivy cherche les vulnérabilités connues (CVE) dans l'image.
+      # exit-code 1 : le job échoue s'il trouve du CRITICAL ou HIGH qui a un correctif disponible.
+      - name: Trivy (scan de vulnérabilités de l'image)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: app:${{ github.sha }}
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "1"
+
+  # Sur main : build, scan, push, déploiement.
+  release:
+    name: Build, scan, push et déploiement
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # jeton OIDC pour AWS
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: docker build
+        run: docker build --build-arg VERSION=${{ github.sha }} -t app:${{ github.sha }} app
+
+      - name: Trivy (scan de vulnérabilités de l'image)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: app:${{ github.sha }}
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "1"
+
+      # On n'arrive ici que si Trivy est passé. Connexion avec le rôle de déploiement (branche main uniquement).
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/gha-scp-app-deploy
+          aws-region: ${{ env.AWS_REGION }}
+
+      # Tag = SHA du commit : on sait toujours exactement quel code tourne en production.
+      - name: Push de l'image dans ECR
+        id: push
+        run: |
+          REGISTRY="${{ vars.AWS_ACCOUNT_ID }}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+          IMAGE="${REGISTRY}/${ECR_REPOSITORY}:${{ github.sha }}"
+          aws ecr get-login-password | docker login --username AWS --password-stdin "$REGISTRY"
+          docker tag app:${{ github.sha }} "$IMAGE"
+          docker push "$IMAGE"
+          echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
+
+      # Déploiement :
+      #   1. on récupère la task definition actuelle
+      #   2. on remplace seulement l'image par la nouvelle
+      #   3. on l'enregistre comme nouvelle version
+      #   4. on demande au service de l'utiliser (déploiement progressif, rollback auto si échec)
+      #   5. on attend que le service soit stable
+      - name: Déploiement sur ECS
+        run: |
+          aws ecs describe-task-definition --task-definition "$TASK_FAMILY" --query taskDefinition > current.json
+
+          jq --arg IMAGE "${{ steps.push.outputs.image }}" '
+            .containerDefinitions[0].image = $IMAGE
+            | del(.taskDefinitionArn, .revision, .status, .requiresAttributes,
+                  .compatibilities, .registeredAt, .registeredBy)
+          ' current.json > new.json
+
+          NEW_ARN=$(aws ecs register-task-definition --cli-input-json file://new.json \
+            --query taskDefinition.taskDefinitionArn --output text)
+          echo "Nouvelle task definition : $NEW_ARN"
+
+          aws ecs update-service --cluster "$ECS_CLUSTER" --service "$ECS_SERVICE" \
+            --task-definition "$NEW_ARN" > /dev/null
+          aws ecs wait services-stable --cluster "$ECS_CLUSTER" --services "$ECS_SERVICE"
+          echo "Déploiement terminé."

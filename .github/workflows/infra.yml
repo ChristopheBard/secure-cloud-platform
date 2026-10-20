@@ -1,0 +1,145 @@
+# Pipeline d'infrastructure (Terraform), en mode GitOps : Git est la source de vérité.
+#
+#   Sur une Pull Request :  fmt -> validate -> Checkov (bloquant) -> plan (lecture seule) -> plan publié en commentaire
+#   Après merge dans main : mêmes contrôles -> apply, après validation humaine (environnement "production")
+#
+# Personne ne lance terraform apply depuis son poste : tout passe par ici, tout est tracé.
+
+name: Infrastructure
+
+on:
+  pull_request:
+    paths: ["infra/**", "bootstrap/**", ".github/workflows/infra.yml"]
+  push:
+    branches: [main]
+    paths: ["infra/**", ".github/workflows/infra.yml"]
+  workflow_dispatch: # bouton "Run workflow" dans l'onglet Actions
+
+# Par défaut le jeton GitHub du workflow n'a AUCUN droit ; chaque job demande seulement ce dont il a besoin.
+permissions: {}
+
+# Jamais deux exécutions en parallèle sur l'infra (et on n'annule pas un apply en cours).
+concurrency:
+  group: infra
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: eu-west-3
+  TF_IN_AUTOMATION: "true"
+  TF_VAR_alert_email: ${{ vars.ALERT_EMAIL }}
+
+jobs:
+  # Contrôles statiques : aucun accès AWS nécessaire.
+  checks:
+    name: Format, validate, Checkov
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read # lire le code du repo
+    steps:
+      # Les actions externes sont référencées par le SHA exact de leur commit, pas par un tag :
+      # un tag peut être déplacé vers du code malveillant, un SHA non.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: 1.16.6
+
+      - name: terraform fmt
+        run: terraform fmt -recursive -check
+
+      - name: terraform validate
+        working-directory: infra
+        run: |
+          terraform init -backend=false -input=false
+          terraform validate
+
+      # Checkov analyse le code Terraform AVANT que quoi que ce soit existe dans AWS.
+      # Un problème de sécurité fait échouer le job, donc la Pull Request ne peut pas être fusionnée.
+      - name: Checkov (scan de sécurité du code Terraform)
+        # pipx (préinstallé sur les runners GitHub) lance une version précise de Checkov dans un environnement isolé.
+        run: pipx run --spec checkov==3.3.29 checkov --directory infra --directory bootstrap --framework terraform --compact --quiet
+
+  # Plan : montre ce que Terraform VA changer. Sur Pull Request uniquement.
+  plan:
+    name: Terraform plan
+    needs: checks
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write      # obtenir le jeton OIDC échangé contre des identifiants AWS
+      pull-requests: write # poster le plan en commentaire de la PR
+    defaults:
+      run:
+        working-directory: infra
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: 1.16.6
+          terraform_wrapper: false
+
+      # Connexion à AWS par OIDC avec le rôle en LECTURE SEULE. Aucune clé stockée dans GitHub.
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/gha-scp-infra-plan
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: terraform init
+        run: terraform init -input=false -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}"
+
+      - name: terraform plan
+        run: terraform plan -input=false -no-color -out=tfplan | tee plan.txt
+
+      # Le plan est publié dans la PR : le relecteur voit exactement ce qui va changer avant d'accepter.
+      - name: Publier le plan dans la Pull Request
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          {
+            echo "### Terraform plan"
+            echo '```'
+            tail -c 60000 plan.txt
+            echo '```'
+          } > comment.md
+          gh pr comment ${{ github.event.pull_request.number }} --body-file comment.md
+
+  # Apply : applique les changements. Seulement après merge dans main.
+  apply:
+    name: Terraform apply
+    needs: checks
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    # L'environnement "production" est configuré dans GitHub avec un relecteur obligatoire :
+    # le job attend qu'un humain clique sur "Approve" avant de démarrer.
+    # C'est aussi ce qui donne accès au rôle d'écriture (trust policy sur environment:production).
+    environment: production
+    permissions:
+      contents: read
+      id-token: write
+    defaults:
+      run:
+        working-directory: infra
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: 1.16.6
+          terraform_wrapper: false
+
+      # Connexion avec le rôle d'ÉCRITURE.
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/gha-scp-infra-apply
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: terraform init
+        run: terraform init -input=false -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}"
+
+      - name: terraform plan
+        run: terraform plan -input=false -out=tfplan
+
+      - name: terraform apply
+        run: terraform apply -input=false tfplan
