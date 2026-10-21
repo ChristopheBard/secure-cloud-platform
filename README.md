@@ -81,7 +81,7 @@ Si le lab refuse la création du fournisseur OIDC ou des rôles IAM, c'est le pl
 | `AWS_REGION` | région du lab |
 | `EKS_ADMIN_ARNS` | liste JSON, ex : `["arn:aws:iam::123456789012:user/odl_user"]` (résultat de `get-caller-identity`) |
 | `SSH_PUBLIC_KEY` | contenu de `~/.ssh/<clé>.pub` (facultatif) |
-| `ALERT_EMAIL` | email qui reçoit les alertes GuardDuty |
+| `ALERT_EMAIL` | **secret** (Settings > Secrets and variables > Actions > Secrets) : email qui reçoit les alertes GuardDuty. Secret et non variable, car le repo est public et le plan est publié dans la PR |
 
 Si le compte a déjà GuardDuty, AWS Config ou Security Hub, passer `enable_guardduty` / `enable_config` / `enable_securityhub` à `false` dans `infra/variables.tf`.
 

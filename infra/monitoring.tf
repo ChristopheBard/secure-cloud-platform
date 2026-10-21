@@ -31,7 +31,7 @@ resource "aws_sns_topic_policy" "alerts" {
 }
 
 resource "aws_sns_topic_subscription" "email" {
-  count     = var.alert_email != "" ? 1 : 0
+  count     = nonsensitive(var.alert_email != "") ? 1 : 0 # seul le fait qu'un email existe est révélé, pas l'adresse
   topic_arn = aws_sns_topic.alerts.arn
   protocol  = "email" # AWS envoie un mail de confirmation : il faut cliquer sur le lien une fois
   endpoint  = var.alert_email

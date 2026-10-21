@@ -44,6 +44,7 @@ variable "alert_email" {
   description = "Email qui reçoit les alertes de sécurité. Vide = pas d'abonnement."
   type        = string
   default     = ""
+  sensitive   = true # masqué dans le plan publié dans la Pull Request (repo public)
 }
 
 variable "log_retention_days" {

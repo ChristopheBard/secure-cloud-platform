@@ -35,7 +35,7 @@ env:
   AWS_REGION: ${{ vars.AWS_REGION }}
   TF_IN_AUTOMATION: "true"
   TF_VAR_region: ${{ vars.AWS_REGION }}
-  TF_VAR_alert_email: ${{ vars.ALERT_EMAIL }}
+  TF_VAR_alert_email: ${{ secrets.ALERT_EMAIL }} # secret : le repo est public, l'email ne doit pas apparaître dans les logs
   TF_VAR_ssh_public_key: ${{ vars.SSH_PUBLIC_KEY }}
   TF_VAR_eks_admin_principal_arns: ${{ vars.EKS_ADMIN_ARNS || '[]' }} # liste JSON, ex : ["arn:aws:iam::123456789012:user/lab"]
 
