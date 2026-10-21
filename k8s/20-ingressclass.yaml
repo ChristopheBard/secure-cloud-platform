@@ -1,0 +1,19 @@
+# Classe d'Ingress d'EKS Auto Mode : chaque Ingress de cette classe crée un Application Load Balancer AWS.
+# internet-facing = le load balancer est public et placé dans les subnets publics (tag kubernetes.io/role/elb).
+apiVersion: eks.amazonaws.com/v1
+kind: IngressClassParams
+metadata:
+  name: alb
+spec:
+  scheme: internet-facing
+---
+apiVersion: networking.k8s.io/v1
+kind: IngressClass
+metadata:
+  name: alb
+spec:
+  controller: eks.amazonaws.com/alb
+  parameters:
+    apiGroup: eks.amazonaws.com
+    kind: IngressClassParams
+    name: alb

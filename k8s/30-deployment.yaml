@@ -1,0 +1,70 @@
+# Déploiement de l'application : 2 copies (pods) réparties par Kubernetes.
+# IMAGE_PLACEHOLDER est remplacé par la pipeline par l'image exacte (tag = SHA du commit).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tasky
+  namespace: tasky
+  labels:
+    app: tasky
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: tasky
+  template:
+    metadata:
+      labels:
+        app: tasky
+    spec:
+      serviceAccountName: tasky # porte le binding cluster-admin (10-rbac.yaml)
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001 # utilisateur créé dans le Dockerfile
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault # filtre les appels système dangereux
+      containers:
+        - name: tasky
+          image: IMAGE_PLACEHOLDER
+          ports:
+            - containerPort: 8080
+          # Exigence de l'exercice : l'accès à MongoDB passe par une variable d'environnement définie dans Kubernetes.
+          # La valeur vient d'un Secret créé par la pipeline (depuis SSM), elle n'est jamais écrite dans git.
+          env:
+            - name: MONGODB_URI
+              valueFrom:
+                secretKeyRef:
+                  name: tasky-secrets
+                  key: mongodb-uri
+            - name: SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: tasky-secrets
+                  key: jwt-secret
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 8080
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          # Durcissement du conteneur : tout ce qui ne contredit pas l'exercice est fermé,
+          # pour que le seul risque restant soit celui imposé (cluster-admin).
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]

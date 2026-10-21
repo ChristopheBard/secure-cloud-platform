@@ -1,0 +1,13 @@
+# Adresse interne stable devant les pods de l'application (pas d'exposition à Internet ici).
+apiVersion: v1
+kind: Service
+metadata:
+  name: tasky
+  namespace: tasky
+spec:
+  type: ClusterIP
+  selector:
+    app: tasky
+  ports:
+    - port: 80
+      targetPort: 8080

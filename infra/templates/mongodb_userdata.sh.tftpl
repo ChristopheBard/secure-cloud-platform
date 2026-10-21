@@ -1,0 +1,77 @@
+#!/bin/bash
+# Premier démarrage de la VM MongoDB (exécuté une seule fois par cloud-init, en root).
+# Logs : /var/log/cloud-init-output.log
+set -euxo pipefail
+
+# Pas de "apt-get upgrade" : la VM reste volontairement sur des paquets obsolètes (exigence de l'exercice).
+apt-get update
+apt-get install -y gnupg curl
+
+# MongoDB 4.4 (fin de vie en février 2024), depuis le dépôt officiel MongoDB pour Ubuntu 20.04.
+curl -fsSL https://pgp.mongodb.com/server-4.4.asc | gpg --dearmor -o /usr/share/keyrings/mongodb-server-4.4.gpg
+echo "deb [ arch=amd64 signed-by=/usr/share/keyrings/mongodb-server-4.4.gpg ] https://repo.mongodb.org/apt/ubuntu focal/mongodb-org/4.4 multiverse" \
+  > /etc/apt/sources.list.d/mongodb-org-4.4.list
+apt-get update
+apt-get install -y mongodb-org
+
+# AWS CLI, pour lire les mots de passe dans SSM et envoyer les sauvegardes dans S3.
+snap install aws-cli --classic
+AWS=/snap/bin/aws
+
+# Les mots de passe sont lus dans SSM grâce au rôle IAM de la VM (on réessaie le temps que le rôle soit actif).
+get_param() {
+  for i in $(seq 1 30); do
+    if $AWS ssm get-parameter --region ${region} --name "$1" --with-decryption --query Parameter.Value --output text; then
+      return 0
+    fi
+    sleep 10
+  done
+  return 1
+}
+ADMIN_PASSWORD=$(get_param ${admin_password_param})
+APP_PASSWORD=$(get_param ${app_password_param})
+
+# 1. Démarrage sans authentification, uniquement en local, pour créer les utilisateurs.
+systemctl enable mongod
+systemctl start mongod
+for i in $(seq 1 30); do mongo --quiet --eval 'db.runCommand({ ping: 1 })' && break; sleep 2; done
+
+mongo admin --quiet <<EOF
+db.createUser({ user: "admin", pwd: "$ADMIN_PASSWORD", roles: [ { role: "root", db: "admin" } ] })
+db.createUser({ user: "tasky", pwd: "$APP_PASSWORD", roles: [ { role: "readWrite", db: "go-mongodb" } ] })
+EOF
+
+# 2. Authentification obligatoire, et écoute sur le réseau.
+#    Le security group n'autorise le port 27017 que depuis les subnets privés du cluster Kubernetes.
+cat > /etc/mongod.conf <<'EOF'
+storage:
+  dbPath: /var/lib/mongodb
+  journal:
+    enabled: true
+systemLog:
+  destination: file
+  logAppend: true
+  path: /var/log/mongodb/mongod.log
+net:
+  port: 27017
+  bindIp: 0.0.0.0
+security:
+  authorization: enabled
+EOF
+systemctl restart mongod
+
+# 3. Script de sauvegarde : dump compressé de toute la base, envoyé dans le bucket S3.
+cat > /usr/local/bin/mongo-backup.sh <<EOF
+#!/bin/bash
+set -euo pipefail
+TS=\$(date -u +%Y-%m-%dT%H%M%SZ)
+PASSWORD=\$($AWS ssm get-parameter --region ${region} --name ${admin_password_param} --with-decryption --query Parameter.Value --output text)
+mongodump --host 127.0.0.1 --username admin --password "\$PASSWORD" --authenticationDatabase admin --archive --gzip \
+  | $AWS s3 cp - "s3://${backup_bucket}/backups/mongodb-\$TS.archive.gz" --region ${region}
+echo "Sauvegarde envoyée : s3://${backup_bucket}/backups/mongodb-\$TS.archive.gz"
+EOF
+chmod 700 /usr/local/bin/mongo-backup.sh
+
+# 4. Sauvegarde automatique tous les jours à 02:00 UTC (cron).
+echo "0 2 * * * root /usr/local/bin/mongo-backup.sh >> /var/log/mongo-backup.log 2>&1" > /etc/cron.d/mongo-backup
+chmod 644 /etc/cron.d/mongo-backup

@@ -1,7 +1,7 @@
 variable "region" {
   description = "Région AWS du projet."
   type        = string
-  default     = "eu-west-3" # Paris
+  default     = "us-east-1" # à aligner sur la région autorisée par le lab CloudLabs
 }
 
 variable "project" {
