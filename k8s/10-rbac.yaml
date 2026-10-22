@@ -1,0 +1,22 @@
+# Identité Kubernetes de l'application (équivalent GCP : un Kubernetes Service Account sur GKE).
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: tasky
+  namespace: tasky
+---
+# INTENTIONNEL (exercice) : l'application reçoit le rôle cluster-admin sur TOUT le cluster.
+# Conséquence : un attaquant qui exploite une faille de l'application peut, avec le jeton du pod,
+# lire tous les secrets, déployer ses propres pods ou supprimer des workloads dans tous les namespaces.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: tasky-cluster-admin
+subjects:
+  - kind: ServiceAccount
+    name: tasky
+    namespace: tasky
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-admin

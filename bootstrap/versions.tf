@@ -7,7 +7,7 @@
 # Ce qu'elle crée :
 #   - le bucket S3 qui stocke le state Terraform de la stack infra/
 #   - le fournisseur d'identité OIDC de GitHub
-#   - les 3 rôles IAM utilisés par GitHub Actions (plan, apply, déploiement app)
+#   - les 3 rôles IAM utilisés par GitHub Actions (plan, apply, déploiement app sur EKS)
 #
 # Son propre state reste en local (fichier ignoré par git) : il est petit et ne bouge quasiment jamais.
 
@@ -24,6 +24,11 @@ terraform {
 
 provider "aws" {
   region = var.region
+
+  # Le lab CloudLabs ajoute lui-même un tag de suivi sur les ressources : Terraform ne doit pas l'effacer.
+  ignore_tags {
+    keys = ["aws-apn-id"]
+  }
 
   # Tags ajoutés automatiquement sur toutes les ressources : on retrouve vite ce qui appartient au projet.
   default_tags {

@@ -1,7 +1,7 @@
-# Pipeline applicative : construire l'image, la scanner, la publier, la déployer.
+# Pipeline applicative : construire l'image, la scanner, la publier, la déployer sur Kubernetes (EKS).
 #
-#   Sur une Pull Request :  docker build -> Trivy (bloquant)
-#   Après merge dans main : docker build -> Trivy (bloquant) -> push ECR (tag = SHA du commit) -> déploiement ECS
+#   Sur une Pull Request :  docker build -> Trivy image (bloquant) + Trivy manifestes Kubernetes (rapport)
+#   Après merge dans main : docker build -> Trivy (bloquant) -> push ECR (tag = SHA du commit) -> kubectl apply -> vérifications
 #
 # Une image vulnérable ne peut donc jamais arriver dans le registre, ni a fortiori en production.
 
@@ -9,10 +9,10 @@ name: Application
 
 on:
   pull_request:
-    paths: ["app/**", ".github/workflows/app.yml"]
+    paths: ["app/**", "k8s/**", ".github/workflows/app.yml"]
   push:
     branches: [main]
-    paths: ["app/**", ".github/workflows/app.yml"]
+    paths: ["app/**", "k8s/**", ".github/workflows/app.yml"]
   workflow_dispatch:
 
 permissions: {}
@@ -22,17 +22,16 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  AWS_REGION: eu-west-3
+  AWS_REGION: ${{ vars.AWS_REGION }}
   ECR_REPOSITORY: scp-app
-  ECS_CLUSTER: scp-cluster
-  ECS_SERVICE: scp-service
-  TASK_FAMILY: scp-app
+  EKS_CLUSTER: scp-eks
+  NAMESPACE: tasky
 
 jobs:
   # Sur Pull Request : on vérifie seulement que l'image se construit et qu'elle est saine.
   # Pas d'accès AWS ici.
   scan:
-    name: Build et scan (Pull Request)
+    name: Build et scans (Pull Request)
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     permissions:
@@ -41,7 +40,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: docker build
-        run: docker build --build-arg VERSION=${{ github.sha }} -t app:${{ github.sha }} app
+        run: docker build -t app:${{ github.sha }} app
 
       # Trivy cherche les vulnérabilités connues (CVE) dans l'image.
       # exit-code 1 : le job échoue s'il trouve du CRITICAL ou HIGH qui a un correctif disponible.
@@ -52,6 +51,31 @@ jobs:
           severity: CRITICAL,HIGH
           ignore-unfixed: true
           exit-code: "1"
+
+      # Trivy lit aussi les manifestes Kubernetes. Il signale le binding cluster-admin imposé par l'exercice (KSV-0111) :
+      # en rapport seulement (exit-code 0), pour montrer que la faiblesse est vue, sans bloquer l'exercice.
+      - name: Trivy (manifestes Kubernetes, rapport non bloquant)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: config
+          scan-ref: k8s
+          exit-code: "0"
+          output: trivy-k8s.txt # le rapport est écrit dans un fichier, réutilisé à l'étape suivante
+
+      # Le rapport ne bloque pas, donc l'étape reste verte : on le rend visible sans fouiller les logs.
+      #   - en haut de la page du run (résumé)
+      #   - en avertissement jaune dans la Pull Request (annotations)
+      - name: Afficher le rapport Trivy Kubernetes
+        run: |
+          {
+            echo "### Trivy : faiblesses détectées dans les manifestes Kubernetes (rapport, non bloquant)"
+            echo '```'
+            cat trivy-k8s.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          grep -E '^KSV-' trivy-k8s.txt | while read -r finding; do
+            echo "::warning title=Trivy Kubernetes::$finding"
+          done
 
   # Sur main : build, scan, push, déploiement.
   release:
@@ -65,7 +89,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: docker build
-        run: docker build --build-arg VERSION=${{ github.sha }} -t app:${{ github.sha }} app
+        run: docker build -t app:${{ github.sha }} app
 
       - name: Trivy (scan de vulnérabilités de l'image)
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
@@ -92,27 +116,44 @@ jobs:
           docker push "$IMAGE"
           echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
 
-      # Déploiement :
-      #   1. on récupère la task definition actuelle
-      #   2. on remplace seulement l'image par la nouvelle
-      #   3. on l'enregistre comme nouvelle version
-      #   4. on demande au service de l'utiliser (déploiement progressif, rollback auto si échec)
-      #   5. on attend que le service soit stable
-      - name: Déploiement sur ECS
+      - name: Connexion au cluster EKS
+        run: aws eks update-kubeconfig --region "$AWS_REGION" --name "$EKS_CLUSTER"
+
+      # Les manifestes sont appliqués dans l'ordre des numéros (namespace, RBAC, IngressClass, Deployment...).
+      # L'image est remplacée par celle qu'on vient de pousser.
+      - name: Déploiement sur Kubernetes
         run: |
-          aws ecs describe-task-definition --task-definition "$TASK_FAMILY" --query taskDefinition > current.json
+          kubectl apply -f k8s/00-namespace.yaml
 
-          jq --arg IMAGE "${{ steps.push.outputs.image }}" '
-            .containerDefinitions[0].image = $IMAGE
-            | del(.taskDefinitionArn, .revision, .status, .requiresAttributes,
-                  .compatibilities, .registeredAt, .registeredBy)
-          ' current.json > new.json
+          # Secret Kubernetes de l'application, alimenté depuis SSM Parameter Store (rien dans git, rien dans les logs).
+          MONGODB_URI=$(aws ssm get-parameter --name /scp/app/mongodb-uri --with-decryption --query Parameter.Value --output text)
+          JWT_SECRET=$(aws ssm get-parameter --name /scp/app/jwt-secret --with-decryption --query Parameter.Value --output text)
+          echo "::add-mask::$MONGODB_URI"
+          echo "::add-mask::$JWT_SECRET"
+          kubectl create secret generic tasky-secrets -n "$NAMESPACE" \
+            --from-literal=mongodb-uri="$MONGODB_URI" \
+            --from-literal=jwt-secret="$JWT_SECRET" \
+            --dry-run=client -o yaml | kubectl apply -f -
 
-          NEW_ARN=$(aws ecs register-task-definition --cli-input-json file://new.json \
-            --query taskDefinition.taskDefinitionArn --output text)
-          echo "Nouvelle task definition : $NEW_ARN"
+          mkdir -p rendered
+          for f in k8s/*.yaml; do
+            sed "s|IMAGE_PLACEHOLDER|${{ steps.push.outputs.image }}|" "$f" > "rendered/$(basename "$f")"
+          done
+          kubectl apply -f rendered/
 
-          aws ecs update-service --cluster "$ECS_CLUSTER" --service "$ECS_SERVICE" \
-            --task-definition "$NEW_ARN" > /dev/null
-          aws ecs wait services-stable --cluster "$ECS_CLUSTER" --services "$ECS_SERVICE"
-          echo "Déploiement terminé."
+          # Attend que les nouveaux pods soient prêts (sinon le job échoue).
+          kubectl rollout status deployment/tasky -n "$NAMESPACE" --timeout=5m
+
+      # Preuves visibles dans les logs de la pipeline (et rejouées en démo).
+      - name: Vérifications
+        run: |
+          echo "Fichier wizexercise.txt dans le conteneur en cours d'exécution :"
+          kubectl exec -n "$NAMESPACE" deploy/tasky -- cat /app/wizexercise.txt
+
+          echo "Adresse publique de l'application (le load balancer peut mettre 2-3 minutes à répondre) :"
+          for i in $(seq 1 30); do
+            HOST=$(kubectl get ingress tasky -n "$NAMESPACE" -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
+            [ -n "$HOST" ] && break
+            sleep 10
+          done
+          echo "http://$HOST"

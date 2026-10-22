@@ -1,0 +1,5 @@
+# Espace de noms de l'application. Les fichiers sont numérotés : kubectl apply -f k8s/ les applique dans l'ordre.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: tasky

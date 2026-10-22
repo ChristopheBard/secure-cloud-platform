@@ -1,4 +1,11 @@
-# Seuls go.mod et main.go sont nécessaires au build.
+# Seuls le code Go, les pages web et wizexercise.txt sont nécessaires au build.
 *
 !go.mod
-!main.go
+!go.sum
+!*.go
+!auth/
+!controllers/
+!database/
+!models/
+!assets/
+!wizexercise.txt

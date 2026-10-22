@@ -17,19 +17,37 @@ resource "aws_iam_openid_connect_provider" "github" {
 locals {
   repo = "${var.github_owner}/${var.github_repo}"
 
+  # Début du "sub" du jeton GitHub. Par défaut "repo:<propriétaire>/<repo>".
+  # Si le repo utilise le format "immuable" de GitHub ("repo:<propriétaire>@<id>/<repo>@<id>"),
+  # on le renseigne dans var.oidc_sub_prefix : les ID numériques ne changent jamais,
+  # même si le repo est renommé ou si quelqu'un recrée un repo du même nom.
+  sub_prefix = var.oidc_sub_prefix != "" ? var.oidc_sub_prefix : "repo:${local.repo}"
+
   # ARN des ressources qui seront créées plus tard par infra/.
   # On les connaît à l'avance grâce à la convention de nommage "<project>-...".
   ecr_repository_arn = "arn:aws:ecr:${var.region}:${local.account_id}:repository/${var.project}-app"
-  ecs_service_arn    = "arn:aws:ecs:${var.region}:${local.account_id}:service/${var.project}-cluster/${var.project}-service"
-  ecs_role_arns = [
-    "arn:aws:iam::${local.account_id}:role/${var.project}-ecs-task-execution",
-    "arn:aws:iam::${local.account_id}:role/${var.project}-ecs-task",
-  ]
+  eks_cluster_arn    = "arn:aws:eks:${var.region}:${local.account_id}:cluster/${var.project}-eks"
+  app_ssm_params_arn = "arn:aws:ssm:${var.region}:${local.account_id}:parameter/${var.project}/app/*"
 
   # Rôles que la pipeline a le droit de gérer : uniquement ceux qui commencent par "scp-".
   # Les rôles de la pipeline s'appellent "gha-scp-..." : ils ne correspondent PAS à ce motif,
   # donc la pipeline ne peut pas modifier ses propres droits.
-  project_role_arn = "arn:aws:iam::${local.account_id}:role/${var.project}-*"
+  project_role_arn             = "arn:aws:iam::${local.account_id}:role/${var.project}-*"
+  project_instance_profile_arn = "arn:aws:iam::${local.account_id}:instance-profile/${var.project}-*"
+  project_bucket_arn           = "arn:aws:s3:::${var.project}-*"
+
+  # Seules politiques AWS que la pipeline peut attacher à un rôle (anti-escalade de privilèges).
+  attachable_policy_arns = [
+    "arn:aws:iam::aws:policy/AmazonEKSClusterPolicy",
+    "arn:aws:iam::aws:policy/AmazonEKSComputePolicy",
+    "arn:aws:iam::aws:policy/AmazonEKSBlockStoragePolicy",
+    "arn:aws:iam::aws:policy/AmazonEKSLoadBalancingPolicy",
+    "arn:aws:iam::aws:policy/AmazonEKSNetworkingPolicy",
+    "arn:aws:iam::aws:policy/AmazonEKSWorkerNodeMinimalPolicy",
+    "arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryPullOnly",
+    "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore",
+    "arn:aws:iam::aws:policy/service-role/AWS_ConfigRole",
+  ]
 }
 
 # Trust policy = QUI a le droit de prendre le rôle.
@@ -44,9 +62,9 @@ locals {
 # au monde pourrait prendre ce rôle : c'est l'erreur de configuration classique.
 data "aws_iam_policy_document" "trust" {
   for_each = {
-    plan   = "repo:${local.repo}:pull_request"
-    apply  = "repo:${local.repo}:environment:production"
-    deploy = "repo:${local.repo}:ref:refs/heads/main"
+    plan   = "${local.sub_prefix}:pull_request"
+    apply  = "${local.sub_prefix}:environment:production"
+    deploy = "${local.sub_prefix}:ref:refs/heads/main"
   }
 
   statement {
@@ -131,21 +149,24 @@ data "aws_iam_policy_document" "infra_apply" {
   #checkov:skip=CKV_AWS_109:Écriture limitée aux services de la stack et à une seule région (voir conditions).
   #checkov:skip=CKV_AWS_111:Idem ; les ARN des ressources n'existent pas encore au moment de la création.
   #checkov:skip=CKV_AWS_356:Idem.
-  #checkov:skip=CKV2_AWS_40:Accès complet aux services, mais restreint à eu-west-3 via aws:RequestedRegion.
+  #checkov:skip=CKV2_AWS_40:Accès complet aux services, mais restreint à la région du projet via aws:RequestedRegion.
 
   # Les services utilisés par la stack, uniquement dans notre région.
   statement {
     sid = "StackServicesInRegion"
     actions = [
-      "ec2:*",                  # VPC, subnets, security groups, endpoints
-      "elasticloadbalancing:*", # ALB
-      "ecs:*",
+      "ec2:*", # VPC, subnets, NAT, security groups, VM MongoDB
+      "eks:*",
       "ecr:*",
       "logs:*",
       "cloudwatch:*",
       "sns:*",
-      "wafv2:*",
-      "acm:*", # certificat TLS
+      "events:*", # règle EventBridge GuardDuty -> SNS
+      "ssm:*",    # mots de passe et URI MongoDB
+      "cloudtrail:*",
+      "guardduty:*",
+      "config:*",
+      "securityhub:*",
     ]
     resources = ["*"]
     condition {
@@ -155,14 +176,14 @@ data "aws_iam_policy_document" "infra_apply" {
     }
   }
 
-  # Validation DNS du certificat, seulement utile si on a un nom de domaine.
+  # Buckets S3 du projet uniquement (sauvegardes, CloudTrail, Config).
   statement {
-    sid       = "Route53ForCertificate"
-    actions   = ["route53:ChangeResourceRecordSets", "route53:GetChange"]
-    resources = ["*"]
+    sid       = "ProjectBuckets"
+    actions   = ["s3:*"]
+    resources = [local.project_bucket_arn, "${local.project_bucket_arn}/*"]
   }
 
-  # IAM : uniquement sur les rôles du projet (scp-*).
+  # IAM : uniquement sur les rôles et instance profiles du projet (scp-*).
   statement {
     sid = "ManageProjectRoles"
     actions = [
@@ -179,20 +200,32 @@ data "aws_iam_policy_document" "infra_apply" {
     resources = [local.project_role_arn]
   }
 
-  # Anti-escalade de privilèges : la pipeline ne peut attacher QU'UNE seule politique AWS,
-  # celle dont ECS a besoin. Impossible de s'attacher "AdministratorAccess" par exemple.
   statement {
-    sid       = "AttachOnlyEcsExecutionPolicy"
+    sid = "ManageProjectInstanceProfiles"
+    actions = [
+      "iam:CreateInstanceProfile",
+      "iam:DeleteInstanceProfile",
+      "iam:AddRoleToInstanceProfile",
+      "iam:RemoveRoleFromInstanceProfile",
+      "iam:TagInstanceProfile",
+    ]
+    resources = [local.project_instance_profile_arn]
+  }
+
+  # Anti-escalade de privilèges : la pipeline ne peut attacher QUE les politiques AWS de la liste.
+  # Impossible de s'attacher "AdministratorAccess" par exemple.
+  statement {
+    sid       = "AttachOnlyAllowedPolicies"
     actions   = ["iam:AttachRolePolicy"]
     resources = [local.project_role_arn]
     condition {
       test     = "ArnEquals"
       variable = "iam:PolicyARN"
-      values   = ["arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"]
+      values   = local.attachable_policy_arns
     }
   }
 
-  # PassRole = "confier" un rôle à un service AWS. Limité à ECS et aux Flow Logs.
+  # PassRole = "confier" un rôle à un service AWS. Limité aux services de la stack.
   statement {
     sid       = "PassProjectRolesToServices"
     actions   = ["iam:PassRole"]
@@ -200,11 +233,17 @@ data "aws_iam_policy_document" "infra_apply" {
     condition {
       test     = "StringEquals"
       variable = "iam:PassedToService"
-      values   = ["ecs-tasks.amazonaws.com", "vpc-flow-logs.amazonaws.com"]
+      values = [
+        "eks.amazonaws.com",
+        "ec2.amazonaws.com",
+        "vpc-flow-logs.amazonaws.com",
+        "cloudtrail.amazonaws.com",
+        "config.amazonaws.com",
+      ]
     }
   }
 
-  # Nécessaire la première fois qu'on utilise ECS ou un load balancer dans un compte neuf.
+  # Nécessaire la première fois qu'on utilise certains services dans un compte neuf.
   statement {
     sid       = "ServiceLinkedRoles"
     actions   = ["iam:CreateServiceLinkedRole"]
@@ -212,7 +251,14 @@ data "aws_iam_policy_document" "infra_apply" {
     condition {
       test     = "StringEquals"
       variable = "iam:AWSServiceName"
-      values   = ["ecs.amazonaws.com", "elasticloadbalancing.amazonaws.com"]
+      values = [
+        "eks.amazonaws.com",
+        "elasticloadbalancing.amazonaws.com",
+        "guardduty.amazonaws.com",
+        "malware-protection.guardduty.amazonaws.com",
+        "config.amazonaws.com",
+        "securityhub.amazonaws.com",
+      ]
     }
   }
 
@@ -237,12 +283,13 @@ resource "aws_iam_role_policy" "infra_apply" {
 
 
 # Rôle 3 : gha-scp-app-deploy
-# Pousse l'image dans ECR et déploie la nouvelle version sur ECS.
-# Utilisable seulement depuis la branche main. Ne peut rien faire d'autre.
+# Pousse l'image dans ECR et déploie la nouvelle version sur EKS.
+# Utilisable seulement depuis la branche main. Ne peut rien faire d'autre dans AWS.
+# Ses droits DANS Kubernetes sont donnés par une "access entry" EKS (infra/eks.tf).
 
 resource "aws_iam_role" "app_deploy" {
   name                 = "gha-${var.project}-app-deploy"
-  description          = "GitHub Actions - push de l'image dans ECR et mise à jour du service ECS (branche main)"
+  description          = "GitHub Actions - push de l'image dans ECR et deploiement sur EKS (branche main)"
   assume_role_policy   = data.aws_iam_policy_document.trust["deploy"].json
   max_session_duration = 3600
 }
@@ -269,28 +316,17 @@ data "aws_iam_policy_document" "app_deploy" {
     ]
     resources = [local.ecr_repository_arn]
   }
-  # Création d'une nouvelle version de la "task definition" (la fiche qui décrit le conteneur).
+  # Récupérer l'adresse du cluster pour configurer kubectl.
   statement {
-    sid       = "TaskDefinitions"
-    actions   = ["ecs:DescribeTaskDefinition", "ecs:RegisterTaskDefinition"]
-    resources = ["*"] # ces API ne permettent pas de cibler une ressource précise
+    sid       = "DescribeProjectCluster"
+    actions   = ["eks:DescribeCluster"]
+    resources = [local.eks_cluster_arn]
   }
-  # Mise à jour du service, uniquement celui du projet.
+  # Lire l'URI MongoDB et la clé JWT pour créer le Secret Kubernetes de l'application.
   statement {
-    sid       = "UpdateProjectService"
-    actions   = ["ecs:UpdateService", "ecs:DescribeServices"]
-    resources = [local.ecs_service_arn]
-  }
-  # La nouvelle task definition référence les 2 rôles ECS : il faut le droit de les "passer" à ECS.
-  statement {
-    sid       = "PassOnlyEcsRoles"
-    actions   = ["iam:PassRole"]
-    resources = local.ecs_role_arns
-    condition {
-      test     = "StringEquals"
-      variable = "iam:PassedToService"
-      values   = ["ecs-tasks.amazonaws.com"]
-    }
+    sid       = "ReadAppSecrets"
+    actions   = ["ssm:GetParameter", "ssm:GetParameters"]
+    resources = [local.app_ssm_params_arn]
   }
 }
 
