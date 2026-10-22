@@ -60,6 +60,22 @@ jobs:
           scan-type: config
           scan-ref: k8s
           exit-code: "0"
+          output: trivy-k8s.txt # le rapport est écrit dans un fichier, réutilisé à l'étape suivante
+
+      # Le rapport ne bloque pas, donc l'étape reste verte : on le rend visible sans fouiller les logs.
+      #   - en haut de la page du run (résumé)
+      #   - en avertissement jaune dans la Pull Request (annotations)
+      - name: Afficher le rapport Trivy Kubernetes
+        run: |
+          {
+            echo "### Trivy : faiblesses détectées dans les manifestes Kubernetes (rapport, non bloquant)"
+            echo '```'
+            cat trivy-k8s.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          grep -E '^KSV-' trivy-k8s.txt | while read -r finding; do
+            echo "::warning title=Trivy Kubernetes::$finding"
+          done
 
   # Sur main : build, scan, push, déploiement.
   release:
