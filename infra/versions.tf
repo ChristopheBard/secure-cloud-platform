@@ -29,6 +29,11 @@ terraform {
 provider "aws" {
   region = var.region
 
+  # Le lab CloudLabs ajoute lui-même un tag de suivi sur les ressources : Terraform ne doit pas l'effacer.
+  ignore_tags {
+    keys = ["aws-apn-id"]
+  }
+
   default_tags {
     tags = {
       Project   = var.project

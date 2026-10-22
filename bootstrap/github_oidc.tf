@@ -17,6 +17,12 @@ resource "aws_iam_openid_connect_provider" "github" {
 locals {
   repo = "${var.github_owner}/${var.github_repo}"
 
+  # Début du "sub" du jeton GitHub. Par défaut "repo:<propriétaire>/<repo>".
+  # Si le repo utilise le format "immuable" de GitHub ("repo:<propriétaire>@<id>/<repo>@<id>"),
+  # on le renseigne dans var.oidc_sub_prefix : les ID numériques ne changent jamais,
+  # même si le repo est renommé ou si quelqu'un recrée un repo du même nom.
+  sub_prefix = var.oidc_sub_prefix != "" ? var.oidc_sub_prefix : "repo:${local.repo}"
+
   # ARN des ressources qui seront créées plus tard par infra/.
   # On les connaît à l'avance grâce à la convention de nommage "<project>-...".
   ecr_repository_arn = "arn:aws:ecr:${var.region}:${local.account_id}:repository/${var.project}-app"
@@ -56,9 +62,9 @@ locals {
 # au monde pourrait prendre ce rôle : c'est l'erreur de configuration classique.
 data "aws_iam_policy_document" "trust" {
   for_each = {
-    plan   = "repo:${local.repo}:pull_request"
-    apply  = "repo:${local.repo}:environment:production"
-    deploy = "repo:${local.repo}:ref:refs/heads/main"
+    plan   = "${local.sub_prefix}:pull_request"
+    apply  = "${local.sub_prefix}:environment:production"
+    deploy = "${local.sub_prefix}:ref:refs/heads/main"
   }
 
   statement {

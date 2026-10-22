@@ -19,3 +19,9 @@ variable "github_repo" {
   description = "Nom du repo GitHub (sans le propriétaire)."
   type        = string
 }
+
+variable "oidc_sub_prefix" {
+  description = "Début du claim sub du jeton GitHub, si le repo utilise le format immuable (gh api repos/<owner>/<repo>/actions/oidc/customization/sub). Vide = repo:<owner>/<repo>."
+  type        = string
+  default     = ""
+}
