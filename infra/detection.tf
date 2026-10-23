@@ -218,4 +218,10 @@ resource "aws_securityhub_standards_subscription" "fsbp" {
   count         = var.enable_securityhub ? 1 : 0
   standards_arn = "arn:aws:securityhub:${var.region}::standards/aws-foundational-security-best-practices/v/1.0.0"
   depends_on    = [aws_securityhub_account.main]
+
+  # L'activation du standard peut prendre plus de 10 min : sans ce délai, Terraform abandonne
+  # alors qu'AWS continue (vécu au premier déploiement, l'apply était rouge pour rien).
+  timeouts {
+    create = "30m"
+  }
 }

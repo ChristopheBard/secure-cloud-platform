@@ -9,6 +9,12 @@ updates:
     schedule:
       interval: weekly
 
+  # Bibliothèques Go de Tasky (go.mod), par exemple golang-jwt.
+  - package-ecosystem: gomod
+    directory: /app
+    schedule:
+      interval: weekly
+
   - package-ecosystem: docker
     directory: /app
     schedule:
