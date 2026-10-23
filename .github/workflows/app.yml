@@ -8,8 +8,9 @@
 name: Application
 
 on:
+  # Sur TOUTES les Pull Requests (pas de filtre de dossiers) : ces contrôles sont obligatoires sur main,
+  # ils doivent donc exister sur chaque PR, sinon le bouton Merge attendrait un contrôle qui ne vient jamais.
   pull_request:
-    paths: ["app/**", "k8s/**", ".github/workflows/app.yml"]
   push:
     branches: [main]
     paths: ["app/**", "k8s/**", ".github/workflows/app.yml"]

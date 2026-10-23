@@ -9,8 +9,9 @@
 name: Infrastructure
 
 on:
+  # Sur TOUTES les Pull Requests (pas de filtre de dossiers) : ces contrôles sont obligatoires sur main,
+  # ils doivent donc exister sur chaque PR, sinon le bouton Merge attendrait un contrôle qui ne vient jamais.
   pull_request:
-    paths: ["infra/**", "bootstrap/**", ".github/workflows/infra.yml"]
   push:
     branches: [main]
     paths: ["infra/**", ".github/workflows/infra.yml"]
