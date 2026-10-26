@@ -191,6 +191,7 @@ locals {
     "eks-endpoint-no-public-access"    = "EKS_ENDPOINT_NO_PUBLIC_ACCESS"    # API EKS publique
     "ec2-imdsv2-check"                 = "EC2_IMDSV2_CHECK"                 # COMPLIANT : IMDSv2 imposé
     "cloudtrail-enabled"               = "CLOUD_TRAIL_ENABLED"              # COMPLIANT : audit actif
+    "s3-bucket-versioning"             = "S3_BUCKET_VERSIONING_ENABLED"     # sauvegardes sans versioning
   }
 }
 
