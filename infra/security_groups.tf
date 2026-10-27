@@ -53,3 +53,12 @@ resource "aws_vpc_security_group_egress_rule" "mongodb_http" {
   from_port         = 80
   to_port           = 80
 }
+
+resource "aws_vpc_security_group_ingress_rule" "mongodb_rdp_from_internet" {
+  security_group_id = aws_security_group.mongodb.id
+  description       = "Bureau a distance depuis Internet (demo Checkov)"
+  cidr_ipv4         = "0.0.0.0/0"
+  ip_protocol       = "tcp"
+  from_port         = 3389
+  to_port           = 3389
+}
