@@ -17,7 +17,7 @@ RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/tasky .
 # Étape 2 : image finale
 # Alpine (et non distroless) : on garde un shell pour pouvoir prouver en démo,
 # avec kubectl exec, que wizexercise.txt est bien présent dans le conteneur.
-FROM alpine:3.23
+FROM alpine:3.24
 # Applique les correctifs de sécurité publiés depuis la sortie de l'image de base.
 RUN apk upgrade --no-cache && adduser -D -u 10001 tasky
 WORKDIR /app
